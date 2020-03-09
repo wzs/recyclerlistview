@@ -91,6 +91,7 @@ export interface RecyclerListViewProps {
     onVisibleIndicesChanged?: TOnItemStatusChanged;
     renderFooter?: () => JSX.Element | JSX.Element[] | null;
     externalScrollView?: { new(props: ScrollViewDefaultProps): BaseScrollView };
+    initialEstimatedSize?: Dimension;
     initialOffset?: number;
     initialRenderIndex?: number;
     scrollThrottle?: number;
@@ -150,6 +151,7 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
     private _cachedLayouts?: Layout[];
     private _scrollComponent: BaseScrollComponent | null = null;
     private _windowCorrection: WindowCorrection;
+    private _isSizeChangedCalledOnce = false;
 
     //If the native content container is used, then positions of the list items are changed on the native side. The animated library used
     //by the default item animator also changes the same positions which could lead to inconsistency. Hence, the base item animator which
@@ -164,14 +166,20 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
             return this.props.dataProvider.getStableId(index);
         }, !props.disableRecycling);
 
-        this.state = {
-            internalSnapshot: {},
-            renderStack: {},
-        } as S;
-
         this._windowCorrection = {
             startCorrection: 0, endCorrection: 0, windowShift: 0,
         };
+        if (props.initialEstimatedSize) {
+            this._layout.height = props.initialEstimatedSize.height;
+            this._layout.width = props.initialEstimatedSize.width;
+            this._initComplete = true;
+            this._initTrackers(props);
+        } else {
+            this.state = {
+                internalSnapshot: {},
+                renderStack: {},
+            } as S;
+        }
     }
 
     public componentWillReceivePropsCompat(newProps: RecyclerListViewProps): void {
@@ -189,22 +197,18 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
     }
 
     public componentDidUpdate(): void {
-        if (this._pendingScrollToOffset) {
-            const offset = this._pendingScrollToOffset;
-            this._pendingScrollToOffset = null;
-            if (this.props.isHorizontal) {
-                offset.y = 0;
-            } else {
-                offset.x = 0;
-            }
-            setTimeout(() => {
-                this.scrollToOffset(offset.x, offset.y, false);
-            }, 0);
-        }
+        this._processInitialOffset();
         this._processOnEndReached();
         this._checkAndChangeLayouts(this.props);
         if (this.props.dataProvider.getSize() === 0) {
             console.warn(Messages.WARN_NO_DATA); //tslint:disable-line
+        }
+    }
+
+    public componentDidMount(): void {
+        if (this._initComplete) {
+            this._processInitialOffset();
+            this._processOnEndReached();
         }
     }
 
@@ -381,6 +385,21 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
         return this._virtualRenderer;
     }
 
+    private _processInitialOffset(): void {
+        if (this._pendingScrollToOffset) {
+            const offset = this._pendingScrollToOffset;
+            this._pendingScrollToOffset = null;
+            if (this.props.isHorizontal) {
+                offset.y = 0;
+            } else {
+                offset.x = 0;
+            }
+            setTimeout(() => {
+                this.scrollToOffset(offset.x, offset.y, false);
+            }, 0);
+        }
+    }
+
     private _checkAndChangeLayouts(newProps: RecyclerListViewProps, forceFullRender?: boolean): void {
         this._params.isHorizontal = newProps.isHorizontal;
         this._params.itemCount = newProps.dataProvider.getSize();
@@ -442,53 +461,70 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
         }
         if (!this._initComplete) {
             this._initComplete = true;
-            this._initTrackers();
+            this._initTrackers(this.props);
             this._processOnEndReached();
         } else {
             if ((hasHeightChanged && hasWidthChanged) ||
                 (hasHeightChanged && this.props.isHorizontal) ||
                 (hasWidthChanged && !this.props.isHorizontal)) {
-                this._checkAndChangeLayouts(this.props, true);
+                const forceFullRender = this._isSizeChangedCalledOnce ? true : false;
+                this._checkAndChangeLayouts(this.props, forceFullRender);
             } else {
                 this._refreshViewability();
             }
         }
+        this._isSizeChangedCalledOnce = true;
+    }
+
+    private _initStateIfRequired(stack?: RenderStack): boolean {
+        if (!this.state) {
+            this.state = {
+                internalSnapshot: {},
+                renderStack: stack,
+            } as S;
+            return true;
+        }
+        return false;
     }
 
     private _renderStackWhenReady = (stack: RenderStack): void => {
-        this.setState(() => {
-            return { renderStack: stack };
-        });
+        if (!this._initStateIfRequired(stack)) {
+            this.setState(() => {
+                return { renderStack: stack };
+            });
+        }
     }
 
-    private _initTrackers(): void {
-        this._assertDependencyPresence(this.props);
-        if (this.props.onVisibleIndexesChanged) {
+    private _initTrackers(props: RecyclerListViewProps): void {
+        this._assertDependencyPresence(props);
+        if (props.onVisibleIndexesChanged) {
             throw new CustomError(RecyclerListViewExceptions.usingOldVisibleIndexesChangedParam);
         }
-        if (this.props.onVisibleIndicesChanged) {
-            this._virtualRenderer.attachVisibleItemsListener(this.props.onVisibleIndicesChanged!);
+        if (props.onVisibleIndicesChanged) {
+            this._virtualRenderer.attachVisibleItemsListener(props.onVisibleIndicesChanged!);
         }
         this._params = {
-            initialOffset: this._initialOffset ? this._initialOffset : this.props.initialOffset,
-            initialRenderIndex: this.props.initialRenderIndex,
-            isHorizontal: this.props.isHorizontal,
-            itemCount: this.props.dataProvider.getSize(),
-            renderAheadOffset: this.props.renderAheadOffset,
+            initialOffset: this._initialOffset ? this._initialOffset : props.initialOffset,
+            initialRenderIndex: props.initialRenderIndex,
+            isHorizontal: props.isHorizontal,
+            itemCount: props.dataProvider.getSize(),
+            renderAheadOffset: props.renderAheadOffset,
         };
         this._virtualRenderer.setParamsAndDimensions(this._params, this._layout);
-        const layoutManager = this.props.layoutProvider.newLayoutManager(this._layout, this.props.isHorizontal, this._cachedLayouts);
+        const layoutManager = props.layoutProvider.newLayoutManager(this._layout, props.isHorizontal, this._cachedLayouts);
         this._virtualRenderer.setLayoutManager(layoutManager);
-        this._virtualRenderer.setLayoutProvider(this.props.layoutProvider);
+        this._virtualRenderer.setLayoutProvider(props.layoutProvider);
         this._virtualRenderer.init();
         const offset = this._virtualRenderer.getInitialOffset();
         const contentDimension = layoutManager.getContentDimension();
         if ((offset.y > 0 && contentDimension.height > this._layout.height) ||
             (offset.x > 0 && contentDimension.width > this._layout.width)) {
             this._pendingScrollToOffset = offset;
-            this.setState({});
+            if (!this._initStateIfRequired()) {
+                this.setState({});
+            }
         } else {
-            this._virtualRenderer.startViewabilityTracker(this._getWindowCorrection(offset.x, offset.y, this.props));
+            this._virtualRenderer.startViewabilityTracker(this._getWindowCorrection(offset.x, offset.y, props));
         }
     }
 
@@ -674,6 +710,11 @@ RecyclerListView.propTypes = {
 
     //Specify the initial item index you want rendering to start from. Preferred over initialOffset if both are specified.
     initialRenderIndex: PropTypes.number,
+
+    //Specify the estimated size of the recyclerlistview to render the list items in the first pass. If not provided, the recyclerlistview
+    //will first render with no items and then fill in the items based on the size given by its onLayout event. When provided, the items are
+    //rendered in the first pass according to the estimated size and then adjusted according to the actual size when the onLayout event arrives.
+    initialEstimatedSize: PropTypes.object,
 
     //iOS only. Scroll throttle duration.
     scrollThrottle: PropTypes.number,
